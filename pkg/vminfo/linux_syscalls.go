@@ -114,6 +114,7 @@ var linuxSyscallChecks = map[string]func(*checkContext, *prog.Syscall) string{
 	"syz_kfuzztest_run":             alwaysSupported,
 	"syz_vhost_vsock_setup":         linuxSyzVhostVsockSupported,
 	"syz_vhost_vsock_send":          linuxSyzVhostVsockSupported,
+	"syz_vsock_virtio_reprobe":      linuxSyzVsockVirtioReprobeSupported,
 }
 
 func linuxSyzOpenDevSupported(ctx *checkContext, call *prog.Syscall) string {
@@ -343,6 +344,10 @@ func linuxSyzUsbIPSupported(ctx *checkContext, call *prog.Syscall) string {
 
 func linuxSyzVhostVsockSupported(ctx *checkContext, call *prog.Syscall) string {
 	return ctx.canOpen("/dev/vhost-vsock")
+}
+
+func linuxSyzVsockVirtioReprobeSupported(ctx *checkContext, call *prog.Syscall) string {
+	return ctx.canWrite("/sys/bus/virtio/drivers/vmw_vsock_virtio_transport/unbind")
 }
 
 func linuxWifiEmulationSupported(ctx *checkContext, call *prog.Syscall) string {
