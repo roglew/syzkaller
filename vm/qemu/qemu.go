@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -79,6 +80,10 @@ type Config struct {
 	Mem int `json:"mem"`
 	// For building kernels without -snapshot for pkg/build (true by default).
 	Snapshot bool `json:"snapshot"`
+	// Attach a vhost-vsock device to each VM (false by default).
+	// The host needs /dev/vhost-vsock. Each boot uses a random guest CID; CIDs are host-global,
+	// so a CID already taken by another VM on the host makes QEMU fail and the boot is retried.
+	Vsock bool `json:"vsock"`
 	// Magic key used to dongle macOS to the device.
 	AppleSmcOsk string `json:"apple_smc_osk"`
 }
@@ -105,6 +110,7 @@ type instance struct {
 	vmimpl.SSHOptions
 	timeouts    targets.Timeouts
 	monport     int
+	vsockCID    uint32
 	forwardPort int
 	mon         net.Conn
 	monEnc      *json.Encoder
@@ -127,8 +133,11 @@ type archConfig struct {
 	UseNewQemuImageOptions bool
 	// BlkDev overrides the block device type used with UseNewQemuImageOptions.
 	// Defaults to "virtio-blk-device" when empty.
-	BlkDev  string
-	CmdLine []string
+	BlkDev string
+	// VsockDev overrides the vhost-vsock device type used with the "vsock" config option.
+	// Defaults to "vhost-vsock-pci" when empty.
+	VsockDev string
+	CmdLine  []string
 }
 
 var archConfigs = map[string]*archConfig{
@@ -173,6 +182,7 @@ var archConfigs = map[string]*archConfig{
 		QemuArgs:               "-machine vexpress-a15 -cpu cortex-a15 -accel tcg,thread=multi",
 		NetDev:                 "virtio-net-device",
 		RngDev:                 "virtio-rng-device",
+		VsockDev:               "vhost-vsock-device",
 		UseNewQemuImageOptions: true,
 		CmdLine: []string{
 			"root=/dev/vda",
@@ -223,6 +233,7 @@ var archConfigs = map[string]*archConfig{
 		QemuArgs: "-M s390-ccw-virtio -cpu max",
 		NetDev:   "virtio-net-ccw",
 		RngDev:   "virtio-rng-ccw",
+		VsockDev: "vhost-vsock-ccw",
 		CmdLine: []string{
 			"root=/dev/vda",
 			// The following kernel parameters is a temporary
@@ -466,6 +477,9 @@ func (inst *instance) Close() error {
 
 func (inst *instance) boot() error {
 	inst.monport = vmimpl.UnusedTCPPort()
+	if inst.cfg.Vsock {
+		inst.vsockCID = randomVsockCID()
+	}
 	args, err := inst.buildQemuArgs()
 	if err != nil {
 		return err
@@ -612,6 +626,15 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 			"-device", "isa-applesmc,osk="+inst.cfg.AppleSmcOsk,
 		)
 	}
+	if inst.cfg.Vsock {
+		vsockDev := inst.archConfig.VsockDev
+		if vsockDev == "" {
+			vsockDev = "vhost-vsock-pci"
+		}
+		args = append(args,
+			"-device", fmt.Sprintf("%v,guest-cid=%v", vsockDev, inst.vsockCID),
+		)
+	}
 	if inst.snapshot != nil {
 		snapshotArgs, err := inst.snapshotEnable()
 		if err != nil {
@@ -620,6 +643,19 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 		args = append(args, snapshotArgs...)
 	}
 	return args, nil
+}
+
+// Guest CIDs 0 (hypervisor), 1 (local) and 2 (host) are reserved.
+const (
+	minVsockCID = 3
+	maxVsockCID = 1<<31 - 1
+)
+
+// randomVsockCID returns a random guest CID. CIDs are host-global, like TCP ports, so a random
+// choice avoids deterministic clashes between VM pools sharing a host. If the CID is in use,
+// vhost-vsock fails with EADDRINUSE and Pool.Create retries the boot with a new CID.
+func randomVsockCID() uint32 {
+	return minVsockCID + rand.Uint32N(maxVsockCID-minVsockCID+1)
 }
 
 // "vfio-pci,host=BN:DN.{{FN%8}},addr=0x11".
